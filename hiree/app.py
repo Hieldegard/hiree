@@ -1,5 +1,6 @@
 import html
 import os
+import random
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -63,7 +64,10 @@ def collect(search_url):
             response = page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
             if not response or response.status >= 400 or 'captcha' in page.url.lower() or '/search/vacancy' not in urlsplit(page.url).path:
                 raise RuntimeError('Поиск недоступен или требуется проверка на hh.ru. Откройте сайт вручную.')
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(random.randint(1500, 3000))
+            for _ in range(3):
+                page.mouse.wheel(0, random.randint(350, 650))
+                page.wait_for_timeout(random.randint(700, 1500))
             links = page.locator('a[href*="/vacancy/"]').evaluate_all('(els) => els.map(e => ({url: e.href, title: e.innerText.trim()}))')
             unique = {}
             for item in links:
@@ -71,18 +75,29 @@ def collect(search_url):
                 if ident and item['title'] and ident not in unique:
                     unique[ident] = item['title']
             if not unique:
-                raise RuntimeError('Вакансии не найдены: проверьте поиск или возможное ограничение доступа hh.ru.')
+                raise RuntimeError('Не удалось получить вакансии. Проверьте поиск и страницу hh.ru в обычном браузере: возможно, сайт запросил проверку или изменил страницу.')
             added = 0
             with db() as con:
                 for ident, title in list(unique.items())[:20]:
                     url = 'https://hh.ru/vacancy/' + ident
-                    response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                    if not response or response.status >= 400 or vacancy_id(page.url) != ident:
+                    page.wait_for_timeout(random.randint(1500, 3500))
+                    # Открываем ссылку со страницы поиска; сайт может открыть новую вкладку.
+                    link = page.locator(f'a[href*="/vacancy/{ident}"]').first
+                    if not link.count():
+                        raise RuntimeError('Ссылка на вакансию исчезла. Сбор остановлен; проверьте страницу hh.ru.')
+                    link.scroll_into_view_if_needed(timeout=10000)
+                    with page.context.expect_page(timeout=3000) as popup:
+                        link.click(timeout=10000, modifiers=['Control'])
+                    detail = popup.value
+                    detail.wait_for_load_state('domcontentloaded', timeout=30000)
+                    if vacancy_id(detail.url) != ident:
                         raise RuntimeError('Чтение вакансии прервано: hh.ru вернул ошибку или запросил проверку. Уже сохранённые вакансии доступны в списке.')
-                    body = page.locator('[data-qa="vacancy-description"]')
+                    body = detail.locator('[data-qa="vacancy-description"]')
                     if not body.count():
                         raise RuntimeError('Описание вакансии не найдено. Сбор остановлен; проверьте страницу hh.ru.')
+                    detail.wait_for_timeout(random.randint(1000, 2500))
                     added += save(con, url, title, body.first.inner_text())
+                    detail.close()
             return added
         finally:
             browser.close()
