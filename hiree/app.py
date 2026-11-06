@@ -54,7 +54,10 @@ def collect(search_url):
     if parts.scheme != 'https' or parts.hostname not in ('hh.ru','www.hh.ru') or parts.path != '/search/vacancy' or parts.username or parts.password or parts.port not in (None,443):
         raise ValueError('Нужна ссылка на поиск https://hh.ru/search/vacancy')
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, executable_path=os.environ.get('HIREE_CHROMIUM', '/usr/bin/chromium'))
+        options = {'headless': True}
+        if os.environ.get('HIREE_CHROMIUM'):
+            options['executable_path'] = os.environ['HIREE_CHROMIUM']
+        browser = p.chromium.launch(**options)
         try:
             page = browser.new_page()
             response = page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
