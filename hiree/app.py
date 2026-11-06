@@ -8,12 +8,29 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DATA = Path(os.environ.get('HIREE_DATA_DIR', str(Path.home() / '.local/share/hiree')))
-SEARCH = 'https://hh.ru/search/vacancy?'+urlencode({'text':'маркетинг руководитель OR head of marketing OR product marketing','area':'113','schedule':'remote','items_on_page':'20'})
+DEFAULT_TEXT = 'маркетинг руководитель OR head of marketing OR product marketing'
+
+def search_url(text, salary, remote, only_salary):
+    text = text.strip()
+    if not text or len(text) > 500:
+        raise ValueError('Укажите поисковый запрос (не более 500 символов).')
+    try:
+        salary = int(salary)
+    except (ValueError, TypeError):
+        raise ValueError('Укажите минимальный доход целым числом.')
+    if not 0 <= salary <= 100000000:
+        raise ValueError('Минимальный доход должен быть от 0 до 100 000 000 ₽.')
+    params = {'text': text, 'area': '113', 'items_on_page': '20'}
+    if remote: params['schedule'] = 'remote'
+    if salary: params.update(salary=str(salary), currency_code='RUR')
+    if only_salary: params['only_with_salary'] = 'true'
+    return 'https://hh.ru/search/vacancy?' + urlencode(params)
 
 def db():
     DATA.mkdir(parents=True, exist_ok=True, mode=0o700)
     con = sqlite3.connect(DATA / 'hiree.sqlite3')
     con.execute('CREATE TABLE IF NOT EXISTS vacancies (source TEXT NOT NULL, id TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, viewed TEXT NOT NULL, PRIMARY KEY(source,id))')
+    con.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
     return con
 
 def vacancy_id(url):
@@ -73,9 +90,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404); return
         with db() as con:
             rows = con.execute('SELECT url,title,text,viewed FROM vacancies ORDER BY viewed DESC').fetchall()
+            settings = dict(con.execute('SELECT key,value FROM settings'))
         esc = html.escape
         cards = ''.join('<article><h2><a rel="noreferrer" href="'+esc(u,quote=True)+'">'+esc(t)+'</a></h2><p>Просмотрено: '+esc(v)+' · Доход и удалённый формат необходимо проверить на странице вакансии</p><details><summary>Описание</summary><pre>'+esc(body)+'</pre></details></article>' for u,t,body,v in rows)
-        content = '''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Hiree — вакансии</title><style>body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222}input{width:100%;box-sizing:border-box;padding:.7rem}button{padding:.7rem;margin-top:.6rem}article{border-top:1px solid #ddd;padding:1rem 0}pre{white-space:pre-wrap;font:inherit}p{line-height:1.5}</style><h1>Hiree</h1><p>Сбор первой страницы поиска hh.ru. Удалённый формат, доход и соответствие необходимо проверить вручную. Отклики не отправляются.</p><form method="post" action="/collect"><label>Ссылка на поиск hh.ru <input name="url" value="'''+esc(SEARCH,quote=True)+'''" required></label><button>Собрать вакансии</button></form><p>'''+str(len(rows))+''' сохранено. Повторные вакансии не добавляются.</p>'''+cards+'''</html>'''
+        checked_remote = ' checked' if settings.get('remote', '1') == '1' else ''
+        checked_salary = ' checked' if settings.get('only_salary', '0') == '1' else ''
+        content = '''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Hiree — вакансии</title><style>body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222}input[type=text],input[type=number]{width:100%;box-sizing:border-box;padding:.7rem}label{display:block;margin:.8rem 0}button{padding:.7rem;margin-top:.6rem}article{border-top:1px solid #ddd;padding:1rem 0}pre{white-space:pre-wrap;font:inherit}p{line-height:1.5}</style><h1>Hiree</h1><p>Сбор первой страницы поиска hh.ru. Отклики не отправляются.</p><form method="post" action="/collect"><h2>Настройки поиска</h2><label>Ключевые слова <input type="text" name="text" value="'''+esc(settings.get('text',DEFAULT_TEXT),quote=True)+'''" required maxlength="500"></label><label>Минимальный доход, ₽ в месяц <input type="number" name="salary" min="0" max="100000000" value="'''+esc(settings.get('salary','250000'),quote=True)+'''" required></label><label><input type="checkbox" name="remote" value="1"'''+checked_remote+'''> Удалённая работа</label><label><input type="checkbox" name="only_salary" value="1"'''+checked_salary+'''> Только вакансии с указанной зарплатой</label><p>Без последней отметки включаются вакансии без указанного дохода. Фильтр hh.ru может включать суммы до вычета налогов и диапазоны, лишь частично достигающие порога. Проверяйте доход и формат на странице вакансии.</p><button>Собрать вакансии</button></form><p>'''+str(len(rows))+''' сохранено за все поиски; изменение настроек не удаляет предыдущие результаты. Повторные вакансии не добавляются.</p>'''+cards+'''</html>'''
         self.respond(200,content)
     def do_POST(self):
         if self.path != '/collect': self.send_error(404); return
@@ -84,7 +104,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length=int(self.headers.get('Content-Length','0'))
             if length <= 0 or length > 8192: raise ValueError('Неверный запрос')
-            url=parse_qs(self.rfile.read(length).decode()).get('url',[''])[0]
+            form=parse_qs(self.rfile.read(length).decode())
+            text=form.get('text',[''])[0]
+            salary=form.get('salary',[''])[0]
+            remote=form.get('remote',['0'])[0] == '1'
+            only_salary=form.get('only_salary',['0'])[0] == '1'
+            url=search_url(text, salary, remote, only_salary)
+            with db() as con:
+                for key, value in {'text':text, 'salary':salary, 'remote':str(int(remote)), 'only_salary':str(int(only_salary))}.items():
+                    con.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (key, value))
             n=collect(url)
             msg=f'Сбор завершён. Новых вакансий: {n}.'
         except Exception as exc:
