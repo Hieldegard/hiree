@@ -8,7 +8,7 @@ if errorlevel 1 goto no_python
 if not exist ".venv\Scripts\python.exe" (
     echo Creating a Python environment...
     py -3.12 -m venv .venv
-    if errorlevel 1 goto failed
+    if not exist ".venv\Scripts\python.exe" goto no_python
 )
 echo Installing required packages...
 .venv\Scripts\python.exe -m pip install -r requirements.txt
